@@ -30,7 +30,7 @@ const lineLayer: LineLayerSpecification = {
   paint: { 'line-color': '#374151', 'line-width': 1 },
 };
 
-const pinsLayer: CircleLayerSpecification = {
+const stayPinsLayer: CircleLayerSpecification = {
   id: 'stay-pins',
   type: 'circle',
   source: 'stay-pins',
@@ -45,14 +45,51 @@ const pinsLayer: CircleLayerSpecification = {
   },
 };
 
+const wishlistPlacePinsLayer: CircleLayerSpecification = {
+  id: 'wishlist-place-pins',
+  type: 'circle',
+  source: 'place-pins',
+  filter: ['==', ['get', 'status'], 'wishlist'] as unknown as CircleLayerSpecification['filter'],
+  paint: {
+    'circle-color': 'rgba(0,0,0,0)',
+    'circle-stroke-color': '#a16207',
+    'circle-stroke-width': 2,
+    'circle-radius': [
+      'interpolate', ['linear'], ['zoom'],
+      4, 3, 8, 5, 12, 8,
+    ] as unknown as number,
+  },
+};
+
+const visitedPlacePinsLayer: CircleLayerSpecification = {
+  id: 'visited-place-pins',
+  type: 'circle',
+  source: 'place-pins',
+  filter: ['==', ['get', 'status'], 'visited'] as unknown as CircleLayerSpecification['filter'],
+  paint: {
+    'circle-color': '#a16207',
+    'circle-stroke-color': '#ffffff',
+    'circle-stroke-width': 1,
+    'circle-radius': [
+      'interpolate', ['linear'], ['zoom'],
+      4, 2, 8, 4.5, 12, 7.5,
+    ] as unknown as number,
+  },
+};
+
 type SelectedCounty = { id: string; name: string };
 type StayRow = { county_id: string; location_lat: number | null; location_lng: number | null };
+type PlaceRow = { location_lat: number | null; location_lng: number | null; status: string };
 type HoveredCounty = { name: string; x: number; y: number };
 
 export default function EnglandMap() {
   const [geojson, setGeojson] = useState<FeatureCollection | null>(null);
   const [completedSlugs, setCompletedSlugs] = useState<string[]>([]);
   const [pinsGeoJSON, setPinsGeoJSON] = useState<FeatureCollection>({
+    type: 'FeatureCollection',
+    features: [],
+  });
+  const [placePinsGeoJSON, setPlacePinsGeoJSON] = useState<FeatureCollection>({
     type: 'FeatureCollection',
     features: [],
   });
@@ -104,6 +141,32 @@ export default function EnglandMap() {
     });
   }
 
+  async function fetchPlaces() {
+    const { data, error } = await supabase
+      .from('places')
+      .select('location_lat, location_lng, status');
+    if (error) {
+      console.error('[EnglandMap] error fetching places:', error);
+      return;
+    }
+    const rows: PlaceRow[] = data ?? [];
+
+    setPlacePinsGeoJSON({
+      type: 'FeatureCollection',
+      features: rows
+        .filter(p => p.location_lat != null && p.location_lng != null)
+        .map((p, i) => ({
+          type: 'Feature',
+          id: i,
+          geometry: {
+            type: 'Point',
+            coordinates: [p.location_lng as number, p.location_lat as number],
+          },
+          properties: { status: p.status },
+        })),
+    });
+  }
+
   useEffect(() => {
     fetch('/counties.geojson')
       .then(r => r.json())
@@ -120,6 +183,7 @@ export default function EnglandMap() {
         });
       });
     fetchStays();
+    fetchPlaces();
   }, []);
 
   const handleClick = useCallback((e: MapMouseEvent) => {
@@ -224,8 +288,14 @@ export default function EnglandMap() {
           <Layer {...completedLabelsLayer} />
         </Source>
 
+        {/* Place pins render below stay pins so stays always read on top */}
+        <Source id="place-pins" type="geojson" data={placePinsGeoJSON}>
+          <Layer {...wishlistPlacePinsLayer} />
+          <Layer {...visitedPlacePinsLayer} />
+        </Source>
+
         <Source id="stay-pins" type="geojson" data={pinsGeoJSON}>
-          <Layer {...pinsLayer} />
+          <Layer {...stayPinsLayer} />
         </Source>
       </Map>
 
@@ -265,6 +335,7 @@ export default function EnglandMap() {
           user={user}
           onClose={() => setSelected(null)}
           onStaysChanged={fetchStays}
+          onPlacesChanged={fetchPlaces}
         />
       )}
 

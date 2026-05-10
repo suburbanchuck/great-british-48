@@ -18,12 +18,24 @@ type Stay = {
   added_by: string | null;
 };
 
+type Place = {
+  id: string;
+  name: string;
+  notes: string | null;
+  location_lat: number | null;
+  location_lng: number | null;
+  status: 'wishlist' | 'visited';
+  visited_on: string | null;
+  added_by: string | null;
+};
+
 type Props = {
   countyId: string;
   countyName: string;
   user: User;
   onClose: () => void;
   onStaysChanged: () => void;
+  onPlacesChanged: () => void;
 };
 
 function today() {
@@ -42,11 +54,11 @@ function formatMonthYear(dateStr: string): string {
   });
 }
 
-async function geocodeLocation(location: string): Promise<{ lat: number; lng: number } | null> {
+async function geocodeLocation(query: string): Promise<{ lat: number; lng: number } | null> {
   try {
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
     const res = await fetch(
-      `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(location)}.json?access_token=${token}&country=gb&limit=1`,
+      `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?access_token=${token}&country=gb&limit=1`,
     );
     const json = await res.json();
     const feature = json.features?.[0];
@@ -59,7 +71,15 @@ async function geocodeLocation(location: string): Promise<{ lat: number; lng: nu
   }
 }
 
-export default function CountySheet({ countyId, countyName, user, onClose, onStaysChanged }: Props) {
+export default function CountySheet({
+  countyId,
+  countyName,
+  user,
+  onClose,
+  onStaysChanged,
+  onPlacesChanged,
+}: Props) {
+  // ── Stay state ──
   const [stays, setStays] = useState<Stay[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -70,6 +90,17 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  // ── Place state ──
+  const [places, setPlaces] = useState<Place[]>([]);
+  const [showPlaceForm, setShowPlaceForm] = useState(false);
+  const [editingPlace, setEditingPlace] = useState<Place | null>(null);
+  const [placeName, setPlaceName] = useState('');
+  const [placeNotes, setPlaceNotes] = useState('');
+  const [placeStatus, setPlaceStatus] = useState<'wishlist' | 'visited'>('wishlist');
+  const [placeVisitedOn, setPlaceVisitedOn] = useState('');
+  const [savingPlace, setSavingPlace] = useState(false);
+  const [confirmDeletePlaceId, setConfirmDeletePlaceId] = useState<string | null>(null);
 
   async function fetchCountyStays() {
     const { data } = await supabase
@@ -83,10 +114,21 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
     if (rows.length === 0) setShowForm(true);
   }
 
+  async function fetchCountyPlaces() {
+    const { data } = await supabase
+      .from('places')
+      .select('id, name, notes, location_lat, location_lng, status, visited_on, added_by')
+      .eq('county_id', countyId)
+      .order('created_at', { ascending: true });
+    setPlaces((data ?? []) as Place[]);
+  }
+
   useEffect(() => {
     fetchCountyStays();
+    fetchCountyPlaces();
   }, [countyId]);
 
+  // ── Stay date range label ──
   const dateRangeLabel = (() => {
     if (!stays.length) return '';
     const minStart = stays.reduce(
@@ -102,6 +144,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
     return startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`;
   })();
 
+  // ── Stay handlers ──
   function startEdit(stay: Stay) {
     setStartDate(stay.start_date);
     setEndDate(stay.end_date);
@@ -205,7 +248,108 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
     onStaysChanged();
   }
 
+  // ── Place handlers ──
+  function startEditPlace(place: Place) {
+    setPlaceName(place.name);
+    setPlaceNotes(place.notes ?? '');
+    setPlaceStatus(place.status);
+    setPlaceVisitedOn(place.visited_on ?? '');
+    setEditingPlace(place);
+    setShowPlaceForm(true);
+  }
+
+  function resetPlaceForm() {
+    setPlaceName('');
+    setPlaceNotes('');
+    setPlaceStatus('wishlist');
+    setPlaceVisitedOn('');
+    setEditingPlace(null);
+  }
+
+  async function handleSavePlace() {
+    if (!placeName.trim()) return;
+    setSavingPlace(true);
+
+    const addedBy =
+      user.user_metadata?.given_name ||
+      user.email?.split('@')[0] ||
+      'Someone';
+    const visitedOnValue = placeStatus === 'visited' ? (placeVisitedOn || null) : null;
+    let savedId: string | null = null;
+
+    if (editingPlace) {
+      const { data, error } = await supabase
+        .from('places')
+        .update({
+          name: placeName.trim(),
+          notes: placeNotes.trim() || null,
+          status: placeStatus,
+          visited_on: visitedOnValue,
+        })
+        .eq('id', editingPlace.id)
+        .select('id')
+        .single();
+      if (error) {
+        console.error('[CountySheet] place update error:', error);
+        setSavingPlace(false);
+        return;
+      }
+      savedId = data.id;
+    } else {
+      const { data, error } = await supabase
+        .from('places')
+        .insert({
+          county_id: countyId,
+          name: placeName.trim(),
+          notes: placeNotes.trim() || null,
+          status: placeStatus,
+          visited_on: visitedOnValue,
+          user_id: user.id,
+          added_by: addedBy,
+        })
+        .select('id')
+        .single();
+      if (error) {
+        console.error('[CountySheet] place insert error:', error);
+        setSavingPlace(false);
+        return;
+      }
+      savedId = data.id;
+    }
+
+    setSavingPlace(false);
+    setShowPlaceForm(false);
+    resetPlaceForm();
+    await fetchCountyPlaces();
+    onPlacesChanged();
+
+    // Geocode using place name + county name for disambiguation
+    if (savedId) {
+      const id = savedId;
+      const query = `${placeName.trim()}, ${countyName}`;
+      geocodeLocation(query).then(coords => {
+        if (!coords) return;
+        supabase
+          .from('places')
+          .update({ location_lat: coords.lat, location_lng: coords.lng })
+          .eq('id', id)
+          .then(({ error }) => {
+            if (!error) onPlacesChanged();
+          });
+      });
+    }
+  }
+
+  async function handleDeletePlace(id: string) {
+    setConfirmDeletePlaceId(null);
+    await supabase.from('places').delete().eq('id', id);
+    await fetchCountyPlaces();
+    onPlacesChanged();
+  }
+
   const isCompleted = loaded && stays.length > 0;
+  const wishlistPlaces = places.filter(p => p.status === 'wishlist');
+  const visitedPlaces = places.filter(p => p.status === 'visited');
 
   return (
     <>
@@ -218,6 +362,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
 
         <div className="px-6 pb-8 pt-2 md:pt-6 max-h-[85vh] overflow-y-auto">
 
+          {/* ── Header ── */}
           {isCompleted ? (
             <div className="flex items-start justify-between mb-6">
               <div className="flex-1 pr-4">
@@ -254,6 +399,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
             </div>
           )}
 
+          {/* ── Stays list ── */}
           {isCompleted && (
             <div className="mb-2">
               <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-3">
@@ -322,6 +468,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
             </div>
           )}
 
+          {/* ── "Log another stay" CTA ── */}
           {!showForm && isCompleted && (
             <button
               onClick={() => setShowForm(true)}
@@ -331,6 +478,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
             </button>
           )}
 
+          {/* ── Stay form ── */}
           {showForm && (
             <>
               {isCompleted && <div className="border-t border-gray-100 mt-4 mb-6" />}
@@ -371,8 +519,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                      Location{' '}
-                      <span className="font-normal text-gray-400">(optional)</span>
+                      Location <span className="font-normal text-gray-400">(optional)</span>
                     </label>
                     <input
                       type="text"
@@ -385,8 +532,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                      Notes{' '}
-                      <span className="font-normal text-gray-400">(optional)</span>
+                      Notes <span className="font-normal text-gray-400">(optional)</span>
                     </label>
                     <textarea
                       value={notes}
@@ -416,6 +562,279 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
               </div>
             </>
           )}
+
+          {/* ── Places section ── */}
+          <div className="mt-6 pt-5 border-t border-gray-100">
+            <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-3">
+              Places
+            </p>
+
+            {places.length > 0 && (
+              <div className="mb-3">
+                {/* Wishlist group */}
+                {wishlistPlaces.length > 0 && (
+                  <div className="mb-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-amber-600 mb-1.5">
+                      Wishlist
+                    </p>
+                    <ul className="divide-y divide-gray-100">
+                      {wishlistPlaces.map(place => (
+                        <li key={place.id} className="py-2">
+                          {confirmDeletePlaceId === place.id ? (
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-sm text-gray-500">Delete this place?</span>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                <button
+                                  onClick={() => handleDeletePlace(place.id)}
+                                  className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
+                                >
+                                  Delete
+                                </button>
+                                <button
+                                  onClick={() => setConfirmDeletePlaceId(null)}
+                                  className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="text-sm flex-1 min-w-0">
+                                <span className="font-medium text-gray-800">{place.name}</span>
+                                {place.added_by && (
+                                  <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">
+                                    {place.added_by}
+                                  </span>
+                                )}
+                                {place.notes && (
+                                  <p className="text-gray-400 text-xs mt-0.5 leading-snug">{place.notes}</p>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-0.5 flex-shrink-0 mt-0.5">
+                                <button
+                                  onClick={() => startEditPlace(place)}
+                                  aria-label="Edit place"
+                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors"
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                                <button
+                                  onClick={() => setConfirmDeletePlaceId(place.id)}
+                                  aria-label="Delete place"
+                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Visited group */}
+                {visitedPlaces.length > 0 && (
+                  <div className="mb-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-green-600 mb-1.5">
+                      Visited
+                    </p>
+                    <ul className="divide-y divide-gray-100">
+                      {visitedPlaces.map(place => (
+                        <li key={place.id} className="py-2">
+                          {confirmDeletePlaceId === place.id ? (
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-sm text-gray-500">Delete this place?</span>
+                              <div className="flex items-center gap-2 flex-shrink-0">
+                                <button
+                                  onClick={() => handleDeletePlace(place.id)}
+                                  className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
+                                >
+                                  Delete
+                                </button>
+                                <button
+                                  onClick={() => setConfirmDeletePlaceId(null)}
+                                  className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="text-sm flex-1 min-w-0">
+                                <span className="font-medium text-gray-800">{place.name}</span>
+                                {place.visited_on && (
+                                  <span className="text-gray-400 text-xs"> · {formatMonthYear(place.visited_on)}</span>
+                                )}
+                                {place.added_by && (
+                                  <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">
+                                    {place.added_by}
+                                  </span>
+                                )}
+                                {place.notes && (
+                                  <p className="text-gray-400 text-xs mt-0.5 leading-snug">{place.notes}</p>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-0.5 flex-shrink-0 mt-0.5">
+                                <button
+                                  onClick={() => startEditPlace(place)}
+                                  aria-label="Edit place"
+                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors"
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                                <button
+                                  onClick={() => setConfirmDeletePlaceId(place.id)}
+                                  aria-label="Delete place"
+                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── "Add a place" CTA ── */}
+            {!showPlaceForm && (
+              <button
+                onClick={() => setShowPlaceForm(true)}
+                className="w-full py-2.5 text-sm font-medium text-amber-700 hover:text-amber-800 border border-dashed border-amber-300 hover:border-amber-400 rounded-xl transition-colors"
+              >
+                + Add a place
+              </button>
+            )}
+
+            {/* ── Place form ── */}
+            {showPlaceForm && (
+              <>
+                {(places.length > 0 || editingPlace) && (
+                  <div className="border-t border-gray-100 mb-5" />
+                )}
+                <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-4">
+                  {editingPlace ? 'Edit place' : 'Add a place'}
+                </p>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                      Name
+                    </label>
+                    <input
+                      type="text"
+                      value={placeName}
+                      onChange={e => setPlaceName(e.target.value)}
+                      placeholder="e.g. The Pig at Combe"
+                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                      Notes <span className="font-normal text-gray-400">(optional)</span>
+                    </label>
+                    <textarea
+                      value={placeNotes}
+                      onChange={e => setPlaceNotes(e.target.value)}
+                      rows={2}
+                      placeholder="Why do you want to go?"
+                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent resize-none"
+                    />
+                  </div>
+
+                  {editingPlace ? (
+                    /* Segmented status toggle for edit mode */
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                        Status
+                      </label>
+                      <div className="flex rounded-xl border border-gray-200 overflow-hidden text-sm">
+                        <button
+                          type="button"
+                          onClick={() => setPlaceStatus('wishlist')}
+                          className={`flex-1 py-2 font-medium transition-colors ${
+                            placeStatus === 'wishlist'
+                              ? 'bg-amber-50 text-amber-700'
+                              : 'text-gray-500 hover:bg-gray-50'
+                          }`}
+                        >
+                          Wishlist
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPlaceStatus('visited')}
+                          className={`flex-1 py-2 font-medium border-l border-gray-200 transition-colors ${
+                            placeStatus === 'visited'
+                              ? 'bg-green-50 text-green-700'
+                              : 'text-gray-500 hover:bg-gray-50'
+                          }`}
+                        >
+                          Visited
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Checkbox for add mode */
+                    <label className="flex items-center gap-2.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={placeStatus === 'visited'}
+                        onChange={e => {
+                          setPlaceStatus(e.target.checked ? 'visited' : 'wishlist');
+                          if (!e.target.checked) setPlaceVisitedOn('');
+                        }}
+                        className="w-4 h-4 rounded accent-green-600"
+                      />
+                      <span className="text-sm text-gray-700">Mark as visited</span>
+                    </label>
+                  )}
+
+                  {placeStatus === 'visited' && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                        Visited on <span className="font-normal text-gray-400">(optional)</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={placeVisitedOn}
+                        onChange={e => setPlaceVisitedOn(e.target.value)}
+                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-3 mt-6">
+                  <button
+                    onClick={handleSavePlace}
+                    disabled={savingPlace || !placeName.trim()}
+                    className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl py-3 text-sm font-semibold transition-colors"
+                  >
+                    {savingPlace ? 'Saving…' : editingPlace ? 'Update place' : 'Save place'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowPlaceForm(false);
+                      resetPlaceForm();
+                    }}
+                    className="flex-1 border border-gray-200 hover:bg-gray-50 text-gray-600 rounded-xl py-3 text-sm font-semibold transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
         </div>
       </div>
     </>
