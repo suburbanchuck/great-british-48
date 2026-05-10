@@ -69,6 +69,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
   const [location, setLocation] = useState('');
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   async function fetchCountyStays() {
     const { data } = await supabase
@@ -198,6 +199,7 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
   }
 
   async function handleDelete(id: string) {
+    setConfirmDeleteId(null);
     await supabase.from('stays').delete().eq('id', id);
     await fetchCountyStays();
     onStaysChanged();
@@ -259,39 +261,61 @@ export default function CountySheet({ countyId, countyName, user, onClose, onSta
               </p>
               <ul className="divide-y divide-gray-100">
                 {stays.map(stay => (
-                  <li key={stay.id} className="flex items-start justify-between gap-2 py-2.5">
-                    <div className="text-sm flex-1 min-w-0">
-                      <span className="font-medium text-gray-800">
-                        {formatDateRange(stay.start_date, stay.end_date)}
-                      </span>
-                      {stay.location && (
-                        <span className="text-gray-500"> · {stay.location}</span>
-                      )}
-                      {stay.added_by && (
-                        <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">
-                          {stay.added_by}
-                        </span>
-                      )}
-                      {stay.notes && (
-                        <p className="text-gray-400 text-xs mt-0.5 leading-snug">{stay.notes}</p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-0.5 flex-shrink-0 mt-0.5">
-                      <button
-                        onClick={() => startEdit(stay)}
-                        aria-label="Edit stay"
-                        className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors"
-                      >
-                        <Pencil size={12} />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(stay.id)}
-                        aria-label="Delete stay"
-                        className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
-                      >
-                        <X size={12} />
-                      </button>
-                    </div>
+                  <li key={stay.id} className="py-2.5">
+                    {confirmDeleteId === stay.id ? (
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-gray-500">Delete this stay?</span>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <button
+                            onClick={() => handleDelete(stay.id)}
+                            className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
+                          >
+                            Delete
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteId(null)}
+                            className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="text-sm flex-1 min-w-0">
+                          <span className="font-medium text-gray-800">
+                            {formatDateRange(stay.start_date, stay.end_date)}
+                          </span>
+                          {stay.location && (
+                            <span className="text-gray-500"> · {stay.location}</span>
+                          )}
+                          {stay.added_by && (
+                            <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">
+                              {stay.added_by}
+                            </span>
+                          )}
+                          {stay.notes && (
+                            <p className="text-gray-400 text-xs mt-0.5 leading-snug">{stay.notes}</p>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-0.5 flex-shrink-0 mt-0.5">
+                          <button
+                            onClick={() => startEdit(stay)}
+                            aria-label="Edit stay"
+                            className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors"
+                          >
+                            <Pencil size={12} />
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteId(stay.id)}
+                            aria-label="Delete stay"
+                            className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
+                          >
+                            <X size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
