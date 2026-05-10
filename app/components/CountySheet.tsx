@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { CheckCircle2, Pencil, X } from 'lucide-react';
 import { createClient } from '@/lib/supabase/client';
+import PlacesAutocomplete from './PlacesAutocomplete';
 
 const supabase = createClient();
 
@@ -28,6 +29,8 @@ type Place = {
   visited_on: string | null;
   added_by: string | null;
 };
+
+type Coords = { lat: number; lng: number };
 
 type Props = {
   countyId: string;
@@ -54,7 +57,7 @@ function formatMonthYear(dateStr: string): string {
   });
 }
 
-async function geocodeLocation(query: string): Promise<{ lat: number; lng: number } | null> {
+async function geocodeLocation(query: string): Promise<Coords | null> {
   try {
     const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
     const res = await fetch(
@@ -87,6 +90,7 @@ export default function CountySheet({
   const [startDate, setStartDate] = useState(today);
   const [endDate, setEndDate] = useState(today);
   const [location, setLocation] = useState('');
+  const [stayCoords, setStayCoords] = useState<Coords | null>(null);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -96,6 +100,7 @@ export default function CountySheet({
   const [showPlaceForm, setShowPlaceForm] = useState(false);
   const [editingPlace, setEditingPlace] = useState<Place | null>(null);
   const [placeName, setPlaceName] = useState('');
+  const [placeCoords, setPlaceCoords] = useState<Coords | null>(null);
   const [placeNotes, setPlaceNotes] = useState('');
   const [placeStatus, setPlaceStatus] = useState<'wishlist' | 'visited'>('wishlist');
   const [placeVisitedOn, setPlaceVisitedOn] = useState('');
@@ -128,27 +133,25 @@ export default function CountySheet({
     fetchCountyPlaces();
   }, [countyId]);
 
-  // ── Stay date range label ──
+  // ── Derived values ──
   const dateRangeLabel = (() => {
     if (!stays.length) return '';
-    const minStart = stays.reduce(
-      (a, s) => (s.start_date < a ? s.start_date : a),
-      stays[0].start_date,
-    );
-    const maxEnd = stays.reduce(
-      (a, s) => (s.end_date > a ? s.end_date : a),
-      stays[0].end_date,
-    );
-    const startLabel = formatMonthYear(minStart);
-    const endLabel = formatMonthYear(maxEnd);
-    return startLabel === endLabel ? startLabel : `${startLabel} – ${endLabel}`;
+    const minStart = stays.reduce((a, s) => (s.start_date < a ? s.start_date : a), stays[0].start_date);
+    const maxEnd = stays.reduce((a, s) => (s.end_date > a ? s.end_date : a), stays[0].end_date);
+    const sl = formatMonthYear(minStart);
+    const el = formatMonthYear(maxEnd);
+    return sl === el ? sl : `${sl} – ${el}`;
   })();
+
+  const wishlistPlaces = places.filter(p => p.status === 'wishlist');
+  const visitedPlaces = places.filter(p => p.status === 'visited');
 
   // ── Stay handlers ──
   function startEdit(stay: Stay) {
     setStartDate(stay.start_date);
     setEndDate(stay.end_date);
     setLocation(stay.location ?? '');
+    setStayCoords(null);
     setNotes(stay.notes ?? '');
     setEditingStay(stay);
     setShowForm(true);
@@ -158,6 +161,7 @@ export default function CountySheet({
     setStartDate(today());
     setEndDate(today());
     setLocation('');
+    setStayCoords(null);
     setNotes('');
     setEditingStay(null);
   }
@@ -176,10 +180,8 @@ export default function CountySheet({
     setSaving(true);
 
     const locationText = location.trim() || null;
-    const addedBy =
-      user.user_metadata?.given_name ||
-      user.email?.split('@')[0] ||
-      'Someone';
+    const isNewStay = !editingStay;
+    const addedBy = user.user_metadata?.given_name || user.email?.split('@')[0] || 'Someone';
     let savedId: string | null = null;
 
     if (editingStay) {
@@ -190,15 +192,12 @@ export default function CountySheet({
           end_date: endDate,
           location: locationText,
           notes: notes.trim() || null,
+          ...(stayCoords ? { location_lat: stayCoords.lat, location_lng: stayCoords.lng } : {}),
         })
         .eq('id', editingStay.id)
         .select('id')
         .single();
-      if (error) {
-        console.error('[CountySheet] update error:', error);
-        setSaving(false);
-        return;
-      }
+      if (error) { console.error('[CountySheet] stay update error:', error); setSaving(false); return; }
       savedId = data.id;
     } else {
       const { data, error } = await supabase
@@ -211,14 +210,11 @@ export default function CountySheet({
           notes: notes.trim() || null,
           user_id: user.id,
           added_by: addedBy,
+          ...(stayCoords ? { location_lat: stayCoords.lat, location_lng: stayCoords.lng } : {}),
         })
         .select('id')
         .single();
-      if (error) {
-        console.error('[CountySheet] insert error:', error);
-        setSaving(false);
-        return;
-      }
+      if (error) { console.error('[CountySheet] stay insert error:', error); setSaving(false); return; }
       savedId = data.id;
     }
 
@@ -226,17 +222,15 @@ export default function CountySheet({
     onStaysChanged();
     onClose();
 
-    if (locationText && savedId) {
+    // Mapbox geocoding fallback — only for new stays when Google didn't provide coords
+    if (locationText && savedId && !stayCoords && isNewStay) {
       const id = savedId;
       geocodeLocation(locationText).then(coords => {
         if (!coords) return;
-        supabase
-          .from('stays')
+        supabase.from('stays')
           .update({ location_lat: coords.lat, location_lng: coords.lng })
           .eq('id', id)
-          .then(({ error }) => {
-            if (!error) onStaysChanged();
-          });
+          .then(({ error }) => { if (!error) onStaysChanged(); });
       });
     }
   }
@@ -251,6 +245,7 @@ export default function CountySheet({
   // ── Place handlers ──
   function startEditPlace(place: Place) {
     setPlaceName(place.name);
+    setPlaceCoords(null);
     setPlaceNotes(place.notes ?? '');
     setPlaceStatus(place.status);
     setPlaceVisitedOn(place.visited_on ?? '');
@@ -260,6 +255,7 @@ export default function CountySheet({
 
   function resetPlaceForm() {
     setPlaceName('');
+    setPlaceCoords(null);
     setPlaceNotes('');
     setPlaceStatus('wishlist');
     setPlaceVisitedOn('');
@@ -270,10 +266,8 @@ export default function CountySheet({
     if (!placeName.trim()) return;
     setSavingPlace(true);
 
-    const addedBy =
-      user.user_metadata?.given_name ||
-      user.email?.split('@')[0] ||
-      'Someone';
+    const isNewPlace = !editingPlace;
+    const addedBy = user.user_metadata?.given_name || user.email?.split('@')[0] || 'Someone';
     const visitedOnValue = placeStatus === 'visited' ? (placeVisitedOn || null) : null;
     let savedId: string | null = null;
 
@@ -285,15 +279,12 @@ export default function CountySheet({
           notes: placeNotes.trim() || null,
           status: placeStatus,
           visited_on: visitedOnValue,
+          ...(placeCoords ? { location_lat: placeCoords.lat, location_lng: placeCoords.lng } : {}),
         })
         .eq('id', editingPlace.id)
         .select('id')
         .single();
-      if (error) {
-        console.error('[CountySheet] place update error:', error);
-        setSavingPlace(false);
-        return;
-      }
+      if (error) { console.error('[CountySheet] place update error:', error); setSavingPlace(false); return; }
       savedId = data.id;
     } else {
       const { data, error } = await supabase
@@ -306,14 +297,11 @@ export default function CountySheet({
           visited_on: visitedOnValue,
           user_id: user.id,
           added_by: addedBy,
+          ...(placeCoords ? { location_lat: placeCoords.lat, location_lng: placeCoords.lng } : {}),
         })
         .select('id')
         .single();
-      if (error) {
-        console.error('[CountySheet] place insert error:', error);
-        setSavingPlace(false);
-        return;
-      }
+      if (error) { console.error('[CountySheet] place insert error:', error); setSavingPlace(false); return; }
       savedId = data.id;
     }
 
@@ -323,19 +311,16 @@ export default function CountySheet({
     await fetchCountyPlaces();
     onPlacesChanged();
 
-    // Geocode using place name + county name for disambiguation
-    if (savedId) {
+    // Mapbox geocoding fallback — only for new places when Google didn't provide coords
+    if (savedId && !placeCoords && isNewPlace) {
       const id = savedId;
       const query = `${placeName.trim()}, ${countyName}`;
       geocodeLocation(query).then(coords => {
         if (!coords) return;
-        supabase
-          .from('places')
+        supabase.from('places')
           .update({ location_lat: coords.lat, location_lng: coords.lng })
           .eq('id', id)
-          .then(({ error }) => {
-            if (!error) onPlacesChanged();
-          });
+          .then(({ error }) => { if (!error) onPlacesChanged(); });
       });
     }
   }
@@ -348,8 +333,10 @@ export default function CountySheet({
   }
 
   const isCompleted = loaded && stays.length > 0;
-  const wishlistPlaces = places.filter(p => p.status === 'wishlist');
-  const visitedPlaces = places.filter(p => p.status === 'visited');
+
+  // Shared input class strings
+  const inputCls = 'w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent';
+  const amberInputCls = 'w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent';
 
   return (
     <>
@@ -368,32 +355,22 @@ export default function CountySheet({
               <div className="flex-1 pr-4">
                 <div className="flex items-center gap-2 mb-1">
                   <CheckCircle2 size={20} className="text-green-600 flex-shrink-0 mt-0.5" />
-                  <h2 className="text-xl font-semibold text-gray-900 leading-tight">
-                    {countyName}
-                  </h2>
+                  <h2 className="text-xl font-semibold text-gray-900 leading-tight">{countyName}</h2>
                 </div>
                 <p className="text-sm text-gray-400 ml-[28px]">
                   {stays.length} {stays.length === 1 ? 'stay' : 'stays'} · {dateRangeLabel}
                 </p>
               </div>
-              <button
-                onClick={onClose}
-                aria-label="Close"
-                className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
-              >
+              <button onClick={onClose} aria-label="Close"
+                className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
                 <X size={16} />
               </button>
             </div>
           ) : (
             <div className="flex items-start justify-between mb-5">
-              <h2 className="text-xl font-semibold text-gray-900 leading-tight pr-4">
-                {countyName}
-              </h2>
-              <button
-                onClick={onClose}
-                aria-label="Close"
-                className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
-              >
+              <h2 className="text-xl font-semibold text-gray-900 leading-tight pr-4">{countyName}</h2>
+              <button onClick={onClose} aria-label="Close"
+                className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
                 <X size={16} />
               </button>
             </div>
@@ -402,9 +379,7 @@ export default function CountySheet({
           {/* ── Stays list ── */}
           {isCompleted && (
             <div className="mb-2">
-              <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-3">
-                Your stays
-              </p>
+              <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-3">Your stays</p>
               <ul className="divide-y divide-gray-100">
                 {stays.map(stay => (
                   <li key={stay.id} className="py-2.5">
@@ -412,16 +387,12 @@ export default function CountySheet({
                       <div className="flex items-center justify-between gap-3">
                         <span className="text-sm text-gray-500">Delete this stay?</span>
                         <div className="flex items-center gap-2 flex-shrink-0">
-                          <button
-                            onClick={() => handleDelete(stay.id)}
-                            className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
-                          >
+                          <button onClick={() => handleDelete(stay.id)}
+                            className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors">
                             Delete
                           </button>
-                          <button
-                            onClick={() => setConfirmDeleteId(null)}
-                            className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors"
-                          >
+                          <button onClick={() => setConfirmDeleteId(null)}
+                            className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors">
                             Cancel
                           </button>
                         </div>
@@ -429,34 +400,20 @@ export default function CountySheet({
                     ) : (
                       <div className="flex items-start justify-between gap-2">
                         <div className="text-sm flex-1 min-w-0">
-                          <span className="font-medium text-gray-800">
-                            {formatDateRange(stay.start_date, stay.end_date)}
-                          </span>
-                          {stay.location && (
-                            <span className="text-gray-500"> · {stay.location}</span>
-                          )}
+                          <span className="font-medium text-gray-800">{formatDateRange(stay.start_date, stay.end_date)}</span>
+                          {stay.location && <span className="text-gray-500"> · {stay.location}</span>}
                           {stay.added_by && (
-                            <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">
-                              {stay.added_by}
-                            </span>
+                            <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">{stay.added_by}</span>
                           )}
-                          {stay.notes && (
-                            <p className="text-gray-400 text-xs mt-0.5 leading-snug">{stay.notes}</p>
-                          )}
+                          {stay.notes && <p className="text-gray-400 text-xs mt-0.5 leading-snug">{stay.notes}</p>}
                         </div>
                         <div className="flex items-center gap-0.5 flex-shrink-0 mt-0.5">
-                          <button
-                            onClick={() => startEdit(stay)}
-                            aria-label="Edit stay"
-                            className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors"
-                          >
+                          <button onClick={() => startEdit(stay)} aria-label="Edit stay"
+                            className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors">
                             <Pencil size={12} />
                           </button>
-                          <button
-                            onClick={() => setConfirmDeleteId(stay.id)}
-                            aria-label="Delete stay"
-                            className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
-                          >
+                          <button onClick={() => setConfirmDeleteId(stay.id)} aria-label="Delete stay"
+                            className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors">
                             <X size={12} />
                           </button>
                         </div>
@@ -468,12 +425,10 @@ export default function CountySheet({
             </div>
           )}
 
-          {/* ── "Log another stay" CTA ── */}
+          {/* ── Log another stay CTA ── */}
           {!showForm && isCompleted && (
-            <button
-              onClick={() => setShowForm(true)}
-              className="w-full mt-4 py-2.5 text-sm font-medium text-green-700 hover:text-green-800 border border-dashed border-green-300 hover:border-green-400 rounded-xl transition-colors"
-            >
+            <button onClick={() => setShowForm(true)}
+              className="w-full mt-4 py-2.5 text-sm font-medium text-green-700 hover:text-green-800 border border-dashed border-green-300 hover:border-green-400 rounded-xl transition-colors">
               + Log another stay
             </button>
           )}
@@ -482,38 +437,23 @@ export default function CountySheet({
           {showForm && (
             <>
               {isCompleted && <div className="border-t border-gray-100 mt-4 mb-6" />}
-
               <div>
                 {isCompleted && (
                   <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-4">
                     {editingStay ? 'Edit stay' : 'Log a stay'}
                   </p>
                 )}
-
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                        Start date
-                      </label>
-                      <input
-                        type="date"
-                        value={startDate}
-                        onChange={e => setStartDate(e.target.value)}
-                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                      />
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">Start date</label>
+                      <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent" />
                     </div>
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                        End date
-                      </label>
-                      <input
-                        type="date"
-                        value={endDate}
-                        min={startDate}
-                        onChange={e => setEndDate(e.target.value)}
-                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                      />
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">End date</label>
+                      <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)}
+                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent" />
                     </div>
                   </div>
 
@@ -521,12 +461,15 @@ export default function CountySheet({
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">
                       Location <span className="font-normal text-gray-400">(optional)</span>
                     </label>
-                    <input
-                      type="text"
+                    <PlacesAutocomplete
                       value={location}
-                      onChange={e => setLocation(e.target.value)}
+                      onChange={val => { setLocation(val); setStayCoords(null); }}
+                      onPlaceSelect={result => {
+                        setLocation(result.formattedAddress || result.name);
+                        setStayCoords(result.coords);
+                      }}
                       placeholder="e.g. Penzance"
-                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                      inputClassName={inputCls}
                     />
                   </div>
 
@@ -534,29 +477,20 @@ export default function CountySheet({
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">
                       Notes <span className="font-normal text-gray-400">(optional)</span>
                     </label>
-                    <textarea
-                      value={notes}
-                      onChange={e => setNotes(e.target.value)}
-                      rows={3}
+                    <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3}
                       placeholder="What did you do there?"
-                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
-                    />
+                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none" />
                   </div>
                 </div>
               </div>
 
               <div className="flex gap-3 mt-6">
-                <button
-                  onClick={handleSave}
-                  disabled={saving || !startDate || !endDate}
-                  className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl py-3 text-sm font-semibold transition-colors"
-                >
+                <button onClick={handleSave} disabled={saving || !startDate || !endDate}
+                  className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl py-3 text-sm font-semibold transition-colors">
                   {saving ? 'Saving…' : editingStay ? 'Update stay' : 'Save stay'}
                 </button>
-                <button
-                  onClick={handleCancel}
-                  className="flex-1 border border-gray-200 hover:bg-gray-50 text-gray-600 rounded-xl py-3 text-sm font-semibold transition-colors"
-                >
+                <button onClick={handleCancel}
+                  className="flex-1 border border-gray-200 hover:bg-gray-50 text-gray-600 rounded-xl py-3 text-sm font-semibold transition-colors">
                   Cancel
                 </button>
               </div>
@@ -565,18 +499,13 @@ export default function CountySheet({
 
           {/* ── Places section ── */}
           <div className="mt-6 pt-5 border-t border-gray-100">
-            <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-3">
-              Places
-            </p>
+            <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-3">Places</p>
 
             {places.length > 0 && (
               <div className="mb-3">
-                {/* Wishlist group */}
                 {wishlistPlaces.length > 0 && (
                   <div className="mb-3">
-                    <p className="text-[10px] font-semibold uppercase tracking-widest text-amber-600 mb-1.5">
-                      Wishlist
-                    </p>
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-amber-600 mb-1.5">Wishlist</p>
                     <ul className="divide-y divide-gray-100">
                       {wishlistPlaces.map(place => (
                         <li key={place.id} className="py-2">
@@ -584,18 +513,10 @@ export default function CountySheet({
                             <div className="flex items-center justify-between gap-3">
                               <span className="text-sm text-gray-500">Delete this place?</span>
                               <div className="flex items-center gap-2 flex-shrink-0">
-                                <button
-                                  onClick={() => handleDeletePlace(place.id)}
-                                  className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
-                                >
-                                  Delete
-                                </button>
-                                <button
-                                  onClick={() => setConfirmDeletePlaceId(null)}
-                                  className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors"
-                                >
-                                  Cancel
-                                </button>
+                                <button onClick={() => handleDeletePlace(place.id)}
+                                  className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors">Delete</button>
+                                <button onClick={() => setConfirmDeletePlaceId(null)}
+                                  className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors">Cancel</button>
                               </div>
                             </div>
                           ) : (
@@ -603,27 +524,17 @@ export default function CountySheet({
                               <div className="text-sm flex-1 min-w-0">
                                 <span className="font-medium text-gray-800">{place.name}</span>
                                 {place.added_by && (
-                                  <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">
-                                    {place.added_by}
-                                  </span>
+                                  <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">{place.added_by}</span>
                                 )}
-                                {place.notes && (
-                                  <p className="text-gray-400 text-xs mt-0.5 leading-snug">{place.notes}</p>
-                                )}
+                                {place.notes && <p className="text-gray-400 text-xs mt-0.5 leading-snug">{place.notes}</p>}
                               </div>
                               <div className="flex items-center gap-0.5 flex-shrink-0 mt-0.5">
-                                <button
-                                  onClick={() => startEditPlace(place)}
-                                  aria-label="Edit place"
-                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors"
-                                >
+                                <button onClick={() => startEditPlace(place)} aria-label="Edit place"
+                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors">
                                   <Pencil size={12} />
                                 </button>
-                                <button
-                                  onClick={() => setConfirmDeletePlaceId(place.id)}
-                                  aria-label="Delete place"
-                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
-                                >
+                                <button onClick={() => setConfirmDeletePlaceId(place.id)} aria-label="Delete place"
+                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors">
                                   <X size={12} />
                                 </button>
                               </div>
@@ -635,12 +546,9 @@ export default function CountySheet({
                   </div>
                 )}
 
-                {/* Visited group */}
                 {visitedPlaces.length > 0 && (
                   <div className="mb-3">
-                    <p className="text-[10px] font-semibold uppercase tracking-widest text-green-600 mb-1.5">
-                      Visited
-                    </p>
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-green-600 mb-1.5">Visited</p>
                     <ul className="divide-y divide-gray-100">
                       {visitedPlaces.map(place => (
                         <li key={place.id} className="py-2">
@@ -648,18 +556,10 @@ export default function CountySheet({
                             <div className="flex items-center justify-between gap-3">
                               <span className="text-sm text-gray-500">Delete this place?</span>
                               <div className="flex items-center gap-2 flex-shrink-0">
-                                <button
-                                  onClick={() => handleDeletePlace(place.id)}
-                                  className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors"
-                                >
-                                  Delete
-                                </button>
-                                <button
-                                  onClick={() => setConfirmDeletePlaceId(null)}
-                                  className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors"
-                                >
-                                  Cancel
-                                </button>
+                                <button onClick={() => handleDeletePlace(place.id)}
+                                  className="px-3 py-1 text-xs font-semibold text-white bg-red-500 hover:bg-red-600 rounded-lg transition-colors">Delete</button>
+                                <button onClick={() => setConfirmDeletePlaceId(null)}
+                                  className="px-3 py-1 text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 rounded-lg transition-colors">Cancel</button>
                               </div>
                             </div>
                           ) : (
@@ -670,27 +570,17 @@ export default function CountySheet({
                                   <span className="text-gray-400 text-xs"> · {formatMonthYear(place.visited_on)}</span>
                                 )}
                                 {place.added_by && (
-                                  <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">
-                                    {place.added_by}
-                                  </span>
+                                  <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">{place.added_by}</span>
                                 )}
-                                {place.notes && (
-                                  <p className="text-gray-400 text-xs mt-0.5 leading-snug">{place.notes}</p>
-                                )}
+                                {place.notes && <p className="text-gray-400 text-xs mt-0.5 leading-snug">{place.notes}</p>}
                               </div>
                               <div className="flex items-center gap-0.5 flex-shrink-0 mt-0.5">
-                                <button
-                                  onClick={() => startEditPlace(place)}
-                                  aria-label="Edit place"
-                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors"
-                                >
+                                <button onClick={() => startEditPlace(place)} aria-label="Edit place"
+                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-gray-100 text-gray-300 hover:text-gray-500 transition-colors">
                                   <Pencil size={12} />
                                 </button>
-                                <button
-                                  onClick={() => setConfirmDeletePlaceId(place.id)}
-                                  aria-label="Delete place"
-                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
-                                >
+                                <button onClick={() => setConfirmDeletePlaceId(place.id)} aria-label="Delete place"
+                                  className="w-7 h-7 flex items-center justify-center rounded-full hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors">
                                   <X size={12} />
                                 </button>
                               </div>
@@ -704,12 +594,10 @@ export default function CountySheet({
               </div>
             )}
 
-            {/* ── "Add a place" CTA ── */}
+            {/* ── Add a place CTA ── */}
             {!showPlaceForm && (
-              <button
-                onClick={() => setShowPlaceForm(true)}
-                className="w-full py-2.5 text-sm font-medium text-amber-700 hover:text-amber-800 border border-dashed border-amber-300 hover:border-amber-400 rounded-xl transition-colors"
-              >
+              <button onClick={() => setShowPlaceForm(true)}
+                className="w-full py-2.5 text-sm font-medium text-amber-700 hover:text-amber-800 border border-dashed border-amber-300 hover:border-amber-400 rounded-xl transition-colors">
                 + Add a place
               </button>
             )}
@@ -717,24 +605,23 @@ export default function CountySheet({
             {/* ── Place form ── */}
             {showPlaceForm && (
               <>
-                {(places.length > 0 || editingPlace) && (
-                  <div className="border-t border-gray-100 mb-5" />
-                )}
+                {places.length > 0 && <div className="border-t border-gray-100 mb-5" />}
                 <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-4">
                   {editingPlace ? 'Edit place' : 'Add a place'}
                 </p>
 
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                      Name
-                    </label>
-                    <input
-                      type="text"
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">Name</label>
+                    <PlacesAutocomplete
                       value={placeName}
-                      onChange={e => setPlaceName(e.target.value)}
+                      onChange={val => { setPlaceName(val); setPlaceCoords(null); }}
+                      onPlaceSelect={result => {
+                        setPlaceName(result.name);
+                        setPlaceCoords(result.coords);
+                      }}
                       placeholder="e.g. The Pig at Combe"
-                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent"
+                      inputClassName={amberInputCls}
                     />
                   </div>
 
@@ -742,58 +629,33 @@ export default function CountySheet({
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">
                       Notes <span className="font-normal text-gray-400">(optional)</span>
                     </label>
-                    <textarea
-                      value={placeNotes}
-                      onChange={e => setPlaceNotes(e.target.value)}
-                      rows={2}
+                    <textarea value={placeNotes} onChange={e => setPlaceNotes(e.target.value)} rows={2}
                       placeholder="Why do you want to go?"
-                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent resize-none"
-                    />
+                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm text-gray-900 placeholder:text-gray-300 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-transparent resize-none" />
                   </div>
 
                   {editingPlace ? (
-                    /* Segmented status toggle for edit mode */
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                        Status
-                      </label>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">Status</label>
                       <div className="flex rounded-xl border border-gray-200 overflow-hidden text-sm">
-                        <button
-                          type="button"
-                          onClick={() => setPlaceStatus('wishlist')}
-                          className={`flex-1 py-2 font-medium transition-colors ${
-                            placeStatus === 'wishlist'
-                              ? 'bg-amber-50 text-amber-700'
-                              : 'text-gray-500 hover:bg-gray-50'
-                          }`}
-                        >
+                        <button type="button" onClick={() => setPlaceStatus('wishlist')}
+                          className={`flex-1 py-2 font-medium transition-colors ${placeStatus === 'wishlist' ? 'bg-amber-50 text-amber-700' : 'text-gray-500 hover:bg-gray-50'}`}>
                           Wishlist
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => setPlaceStatus('visited')}
-                          className={`flex-1 py-2 font-medium border-l border-gray-200 transition-colors ${
-                            placeStatus === 'visited'
-                              ? 'bg-green-50 text-green-700'
-                              : 'text-gray-500 hover:bg-gray-50'
-                          }`}
-                        >
+                        <button type="button" onClick={() => setPlaceStatus('visited')}
+                          className={`flex-1 py-2 font-medium border-l border-gray-200 transition-colors ${placeStatus === 'visited' ? 'bg-green-50 text-green-700' : 'text-gray-500 hover:bg-gray-50'}`}>
                           Visited
                         </button>
                       </div>
                     </div>
                   ) : (
-                    /* Checkbox for add mode */
                     <label className="flex items-center gap-2.5 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={placeStatus === 'visited'}
+                      <input type="checkbox" checked={placeStatus === 'visited'}
                         onChange={e => {
                           setPlaceStatus(e.target.checked ? 'visited' : 'wishlist');
                           if (!e.target.checked) setPlaceVisitedOn('');
                         }}
-                        className="w-4 h-4 rounded accent-green-600"
-                      />
+                        className="w-4 h-4 rounded accent-green-600" />
                       <span className="text-sm text-gray-700">Mark as visited</span>
                     </label>
                   )}
@@ -803,31 +665,19 @@ export default function CountySheet({
                       <label className="block text-sm font-medium text-gray-700 mb-1.5">
                         Visited on <span className="font-normal text-gray-400">(optional)</span>
                       </label>
-                      <input
-                        type="date"
-                        value={placeVisitedOn}
-                        onChange={e => setPlaceVisitedOn(e.target.value)}
-                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                      />
+                      <input type="date" value={placeVisitedOn} onChange={e => setPlaceVisitedOn(e.target.value)}
+                        className="w-full border border-gray-200 rounded-xl px-3 py-2.5 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent" />
                     </div>
                   )}
                 </div>
 
                 <div className="flex gap-3 mt-6">
-                  <button
-                    onClick={handleSavePlace}
-                    disabled={savingPlace || !placeName.trim()}
-                    className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl py-3 text-sm font-semibold transition-colors"
-                  >
+                  <button onClick={handleSavePlace} disabled={savingPlace || !placeName.trim()}
+                    className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl py-3 text-sm font-semibold transition-colors">
                     {savingPlace ? 'Saving…' : editingPlace ? 'Update place' : 'Save place'}
                   </button>
-                  <button
-                    onClick={() => {
-                      setShowPlaceForm(false);
-                      resetPlaceForm();
-                    }}
-                    className="flex-1 border border-gray-200 hover:bg-gray-50 text-gray-600 rounded-xl py-3 text-sm font-semibold transition-colors"
-                  >
+                  <button onClick={() => { setShowPlaceForm(false); resetPlaceForm(); }}
+                    className="flex-1 border border-gray-200 hover:bg-gray-50 text-gray-600 rounded-xl py-3 text-sm font-semibold transition-colors">
                     Cancel
                   </button>
                 </div>

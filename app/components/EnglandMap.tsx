@@ -23,6 +23,24 @@ function slugify(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9 ']/g, '').replace(/[ ']+/g, '-');
 }
 
+// "Oct 28–31, 2025" / "Oct 28 – Nov 3, 2025" / "Oct 28, 2025"
+function formatTooltipDateRange(start: string, end: string): string {
+  if (!start) return '';
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const s = new Date(`${start}T00:00:00`);
+  const e = new Date(`${end}T00:00:00`);
+  const sM = months[s.getMonth()];
+  const eM = months[e.getMonth()];
+  const sD = s.getDate();
+  const eD = e.getDate();
+  const sY = s.getFullYear();
+  const eY = e.getFullYear();
+  if (start === end) return `${sM} ${sD}, ${sY}`;
+  if (sY === eY && s.getMonth() === e.getMonth()) return `${sM} ${sD}–${eD}, ${sY}`;
+  if (sY === eY) return `${sM} ${sD} – ${eM} ${eD}, ${sY}`;
+  return `${sM} ${sD}, ${sY} – ${eM} ${eD}, ${eY}`;
+}
+
 const lineLayer: LineLayerSpecification = {
   id: 'counties-line',
   type: 'line',
@@ -30,6 +48,7 @@ const lineLayer: LineLayerSpecification = {
   paint: { 'line-color': '#374151', 'line-width': 1 },
 };
 
+// Stay pins: large filled bronze
 const stayPinsLayer: CircleLayerSpecification = {
   id: 'stay-pins',
   type: 'circle',
@@ -45,6 +64,7 @@ const stayPinsLayer: CircleLayerSpecification = {
   },
 };
 
+// Wishlist place pins: hollow dark-mauve outline
 const wishlistPlacePinsLayer: CircleLayerSpecification = {
   id: 'wishlist-place-pins',
   type: 'circle',
@@ -52,7 +72,7 @@ const wishlistPlacePinsLayer: CircleLayerSpecification = {
   filter: ['==', ['get', 'status'], 'wishlist'] as unknown as CircleLayerSpecification['filter'],
   paint: {
     'circle-color': 'rgba(0,0,0,0)',
-    'circle-stroke-color': '#a16207',
+    'circle-stroke-color': '#7c4a6b',
     'circle-stroke-width': 2,
     'circle-radius': [
       'interpolate', ['linear'], ['zoom'],
@@ -61,13 +81,14 @@ const wishlistPlacePinsLayer: CircleLayerSpecification = {
   },
 };
 
+// Visited place pins: smaller filled dark-mauve
 const visitedPlacePinsLayer: CircleLayerSpecification = {
   id: 'visited-place-pins',
   type: 'circle',
   source: 'place-pins',
   filter: ['==', ['get', 'status'], 'visited'] as unknown as CircleLayerSpecification['filter'],
   paint: {
-    'circle-color': '#a16207',
+    'circle-color': '#7c4a6b',
     'circle-stroke-color': '#ffffff',
     'circle-stroke-width': 1,
     'circle-radius': [
@@ -78,9 +99,23 @@ const visitedPlacePinsLayer: CircleLayerSpecification = {
 };
 
 type SelectedCounty = { id: string; name: string };
-type StayRow = { county_id: string; location_lat: number | null; location_lng: number | null };
-type PlaceRow = { location_lat: number | null; location_lng: number | null; status: string };
+type StayRow = {
+  county_id: string;
+  location_lat: number | null;
+  location_lng: number | null;
+  location: string | null;
+  start_date: string;
+  end_date: string;
+};
+type PlaceRow = {
+  location_lat: number | null;
+  location_lng: number | null;
+  status: string;
+  name: string;
+  notes: string | null;
+};
 type HoveredCounty = { name: string; x: number; y: number };
+type PinTooltip = { content: string; x: number; y: number };
 
 export default function EnglandMap() {
   const [geojson, setGeojson] = useState<FeatureCollection | null>(null);
@@ -96,6 +131,7 @@ export default function EnglandMap() {
   const [selected, setSelected] = useState<SelectedCounty | null>(null);
   const [cursor, setCursor] = useState<string>('auto');
   const [hoveredCounty, setHoveredCounty] = useState<HoveredCounty | null>(null);
+  const [hoveredPin, setHoveredPin] = useState<PinTooltip | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
 
@@ -104,27 +140,23 @@ export default function EnglandMap() {
       setUser(session?.user ?? null);
       setAuthLoading(false);
     });
-
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
     });
-
     return () => subscription.unsubscribe();
   }, []);
 
   async function fetchStays() {
     const { data, error } = await supabase
       .from('stays')
-      .select('county_id, location_lat, location_lng');
+      .select('county_id, location_lat, location_lng, location, start_date, end_date');
     if (error) {
       console.error('[EnglandMap] error fetching stays:', error);
       return;
     }
     const rows: StayRow[] = data ?? [];
-
     const slugSet = new Set(rows.map(s => s.county_id));
     setCompletedSlugs([...slugSet]);
-
     setPinsGeoJSON({
       type: 'FeatureCollection',
       features: rows
@@ -136,7 +168,11 @@ export default function EnglandMap() {
             type: 'Point',
             coordinates: [s.location_lng as number, s.location_lat as number],
           },
-          properties: {},
+          properties: {
+            location: s.location,
+            start_date: s.start_date,
+            end_date: s.end_date,
+          },
         })),
     });
   }
@@ -144,13 +180,12 @@ export default function EnglandMap() {
   async function fetchPlaces() {
     const { data, error } = await supabase
       .from('places')
-      .select('location_lat, location_lng, status');
+      .select('location_lat, location_lng, status, name, notes');
     if (error) {
       console.error('[EnglandMap] error fetching places:', error);
       return;
     }
     const rows: PlaceRow[] = data ?? [];
-
     setPlacePinsGeoJSON({
       type: 'FeatureCollection',
       features: rows
@@ -162,7 +197,7 @@ export default function EnglandMap() {
             type: 'Point',
             coordinates: [p.location_lng as number, p.location_lat as number],
           },
-          properties: { status: p.status },
+          properties: { status: p.status, name: p.name, notes: p.notes },
         })),
     });
   }
@@ -188,32 +223,61 @@ export default function EnglandMap() {
 
   const handleClick = useCallback((e: MapMouseEvent) => {
     if (!user) return;
-    const feature = e.features?.[0];
-    if (!feature) return;
+    // Only county fill clicks open the sheet; ignore pin clicks
+    const countyFeature = e.features?.find(f => (f.layer as { id?: string })?.id === 'counties-fill');
+    if (!countyFeature) return;
     setSelected({
-      id: feature.properties?.slug as string,
-      name: feature.properties?.NAME as string,
+      id: countyFeature.properties?.slug as string,
+      name: countyFeature.properties?.NAME as string,
     });
   }, [user]);
 
   const handleMouseMove = useCallback((e: MapMouseEvent) => {
     const feature = e.features?.[0];
-    if (feature) {
+    if (!feature) {
+      setCursor('auto');
+      setHoveredCounty(null);
+      setHoveredPin(null);
+      return;
+    }
+
+    const layerId = (feature.layer as { id?: string })?.id;
+
+    if (layerId === 'stay-pins') {
+      setCursor('default');
+      setHoveredCounty(null);
+      const loc = feature.properties?.location as string | null;
+      const dateStr = formatTooltipDateRange(
+        feature.properties?.start_date as string,
+        feature.properties?.end_date as string,
+      );
+      setHoveredPin({ content: loc ? `${loc} · ${dateStr}` : dateStr, x: e.point.x, y: e.point.y });
+
+    } else if (layerId === 'visited-place-pins' || layerId === 'wishlist-place-pins') {
+      setCursor('default');
+      setHoveredCounty(null);
+      const name = feature.properties?.name as string;
+      const status = feature.properties?.status as string;
+      const notes = feature.properties?.notes as string | null;
+      let content = `${name} · ${status}`;
+      if (notes) content += ` · ${notes.length > 60 ? notes.slice(0, 60) + '…' : notes}`;
+      setHoveredPin({ content, x: e.point.x, y: e.point.y });
+
+    } else if (layerId === 'counties-fill') {
       setCursor(user ? 'pointer' : 'default');
+      setHoveredPin(null);
       setHoveredCounty({
         name: feature.properties?.NAME as string,
         x: e.point.x,
         y: e.point.y,
       });
-    } else {
-      setCursor('auto');
-      setHoveredCounty(null);
     }
   }, [user]);
 
   const handleMouseLeave = useCallback(() => {
     setCursor('auto');
     setHoveredCounty(null);
+    setHoveredPin(null);
   }, []);
 
   async function handleSignOut() {
@@ -276,7 +340,7 @@ export default function EnglandMap() {
         mapStyle="mapbox://styles/mapbox/light-v11"
         touchZoomRotate
         touchPitch={false}
-        interactiveLayerIds={['counties-fill']}
+        interactiveLayerIds={['counties-fill', 'stay-pins', 'visited-place-pins', 'wishlist-place-pins']}
         onClick={handleClick}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
@@ -288,7 +352,7 @@ export default function EnglandMap() {
           <Layer {...completedLabelsLayer} />
         </Source>
 
-        {/* Place pins render below stay pins so stays always read on top */}
+        {/* Place pins render below stay pins so stays always appear on top */}
         <Source id="place-pins" type="geojson" data={placePinsGeoJSON}>
           <Layer {...wishlistPlacePinsLayer} />
           <Layer {...visitedPlacePinsLayer} />
@@ -301,7 +365,7 @@ export default function EnglandMap() {
 
       <MapTitle />
 
-      {/* Progress counter + signed-in user — top-left HUD badge */}
+      {/* Progress counter + signed-in user */}
       <div className="fixed top-4 left-4 z-10 pointer-events-none select-none flex items-center gap-2">
         <div className="bg-white rounded-xl shadow px-4 py-2 text-sm font-semibold text-gray-700 tabular-nums">
           {completedSlugs.length} / 48
@@ -318,13 +382,23 @@ export default function EnglandMap() {
         )}
       </div>
 
-      {/* Hover tooltip — desktop only, hidden when sheet is open */}
+      {/* County hover tooltip */}
       {!selected && hoveredCounty && (
         <div
           className="fixed z-10 pointer-events-none bg-white text-gray-800 text-xs font-medium px-2.5 py-1.5 rounded-lg shadow-lg border border-gray-100 whitespace-nowrap"
           style={{ left: hoveredCounty.x + 14, top: hoveredCounty.y - 10 }}
         >
           {hoveredCounty.name}
+        </div>
+      )}
+
+      {/* Pin hover tooltip (desktop) */}
+      {!selected && hoveredPin && (
+        <div
+          className="fixed z-10 pointer-events-none bg-white text-gray-800 text-xs font-medium px-2.5 py-1.5 rounded-lg shadow-lg border border-gray-100 whitespace-nowrap max-w-xs truncate"
+          style={{ left: hoveredPin.x + 14, top: hoveredPin.y - 10 }}
+        >
+          {hoveredPin.content}
         </div>
       )}
 
