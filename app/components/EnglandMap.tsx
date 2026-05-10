@@ -13,6 +13,7 @@ import type { FeatureCollection } from 'geojson';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { createClient } from '@supabase/supabase-js';
 import CountySheet from './CountySheet';
+import MapTitle from './MapTitle';
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -210,6 +211,8 @@ export default function EnglandMap() {
           <Layer {...pinsLayer} />
         </Source>
       </Map>
+
+      <MapTitle />
 
       {/* Progress counter — top-left HUD badge */}
       <div className="fixed top-4 left-4 z-10 pointer-events-none select-none bg-white rounded-xl shadow px-4 py-2 text-sm font-semibold text-gray-700 tabular-nums">

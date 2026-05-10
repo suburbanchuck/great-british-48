@@ -1,6 +1,14 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
+import { Overpass } from "next/font/google";
 import "./globals.css";
+
+const overpass = Overpass({
+  subsets: ["latin"],
+  weight: ["300", "700"],
+  variable: "--font-overpass",
+  display: "swap",
+});
 
 const geistSans = localFont({
   src: "./fonts/GeistVF.woff",
@@ -25,7 +33,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable}`}>
+      <body className={`${geistSans.variable} ${geistMono.variable} ${overpass.variable}`}>
         {children}
       </body>
     </html>
