@@ -1,13 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import type { User } from '@supabase/supabase-js';
 import { CheckCircle2, Pencil, X } from 'lucide-react';
+import { createClient } from '@/lib/supabase/client';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-);
+const supabase = createClient();
 
 type Stay = {
   id: string;
@@ -17,11 +15,13 @@ type Stay = {
   notes: string | null;
   location_lat: number | null;
   location_lng: number | null;
+  added_by: string | null;
 };
 
 type Props = {
   countyId: string;
   countyName: string;
+  user: User;
   onClose: () => void;
   onStaysChanged: () => void;
 };
@@ -59,7 +59,7 @@ async function geocodeLocation(location: string): Promise<{ lat: number; lng: nu
   }
 }
 
-export default function CountySheet({ countyId, countyName, onClose, onStaysChanged }: Props) {
+export default function CountySheet({ countyId, countyName, user, onClose, onStaysChanged }: Props) {
   const [stays, setStays] = useState<Stay[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -73,7 +73,7 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
   async function fetchCountyStays() {
     const { data } = await supabase
       .from('stays')
-      .select('id, start_date, end_date, location, notes, location_lat, location_lng')
+      .select('id, start_date, end_date, location, notes, location_lat, location_lng, added_by')
       .eq('county_id', countyId)
       .order('start_date', { ascending: false });
     const rows = data ?? [];
@@ -86,7 +86,6 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
     fetchCountyStays();
   }, [countyId]);
 
-  // Derive date range across all stays for the celebration header
   const dateRangeLabel = (() => {
     if (!stays.length) return '';
     const minStart = stays.reduce(
@@ -133,6 +132,10 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
     setSaving(true);
 
     const locationText = location.trim() || null;
+    const addedBy =
+      user.user_metadata?.given_name ||
+      user.email?.split('@')[0] ||
+      'Someone';
     let savedId: string | null = null;
 
     if (editingStay) {
@@ -162,6 +165,8 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
           end_date: endDate,
           location: locationText,
           notes: notes.trim() || null,
+          user_id: user.id,
+          added_by: addedBy,
         })
         .select('id')
         .single();
@@ -177,21 +182,16 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
     onStaysChanged();
     onClose();
 
-    // Background geocode — safe after close; only touches external APIs and the parent callback
     if (locationText && savedId) {
       const id = savedId;
       geocodeLocation(locationText).then(coords => {
-        if (!coords) {
-          console.warn('[CountySheet] no geocoding result for:', locationText);
-          return;
-        }
+        if (!coords) return;
         supabase
           .from('stays')
           .update({ location_lat: coords.lat, location_lng: coords.lng })
           .eq('id', id)
           .then(({ error }) => {
-            if (error) console.warn('[CountySheet] failed to store coordinates:', error);
-            else onStaysChanged();
+            if (!error) onStaysChanged();
           });
       });
     }
@@ -216,7 +216,6 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
 
         <div className="px-6 pb-8 pt-2 md:pt-6 max-h-[85vh] overflow-y-auto">
 
-          {/* ── Celebration header (completed counties) ── */}
           {isCompleted ? (
             <div className="flex items-start justify-between mb-6">
               <div className="flex-1 pr-4">
@@ -239,7 +238,6 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
               </button>
             </div>
           ) : (
-            /* ── Plain header (no stays yet, or still loading) ── */
             <div className="flex items-start justify-between mb-5">
               <h2 className="text-xl font-semibold text-gray-900 leading-tight pr-4">
                 {countyName}
@@ -254,7 +252,6 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
             </div>
           )}
 
-          {/* ── Stays list ── */}
           {isCompleted && (
             <div className="mb-2">
               <p className="text-xs font-medium text-gray-400 uppercase tracking-widest mb-3">
@@ -269,6 +266,11 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
                       </span>
                       {stay.location && (
                         <span className="text-gray-500"> · {stay.location}</span>
+                      )}
+                      {stay.added_by && (
+                        <span className="ml-1.5 text-[10px] font-medium text-gray-300 uppercase tracking-wide">
+                          {stay.added_by}
+                        </span>
                       )}
                       {stay.notes && (
                         <p className="text-gray-400 text-xs mt-0.5 leading-snug">{stay.notes}</p>
@@ -296,7 +298,6 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
             </div>
           )}
 
-          {/* ── "Log another stay" collapsed CTA ── */}
           {!showForm && isCompleted && (
             <button
               onClick={() => setShowForm(true)}
@@ -306,7 +307,6 @@ export default function CountySheet({ countyId, countyName, onClose, onStaysChan
             </button>
           )}
 
-          {/* ── Form ── */}
           {showForm && (
             <>
               {isCompleted && <div className="border-t border-gray-100 mt-4 mb-6" />}
